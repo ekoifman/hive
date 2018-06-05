@@ -33,7 +33,6 @@ import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.hive.common.ValidTxnList;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
-import org.apache.hadoop.hive.metastore.TableType;
 import org.apache.hadoop.hive.metastore.Warehouse;
 import org.apache.hadoop.hive.metastore.api.CompactionResponse;
 import org.apache.hadoop.hive.metastore.api.InvalidOperationException;
@@ -41,7 +40,6 @@ import org.apache.hadoop.hive.metastore.api.MetaException;
 import org.apache.hadoop.hive.metastore.api.Partition;
 import org.apache.hadoop.hive.metastore.api.ShowCompactResponse;
 import org.apache.hadoop.hive.metastore.api.ShowCompactResponseElement;
-import org.apache.hadoop.hive.metastore.api.StorageDescriptor;
 import org.apache.hadoop.hive.metastore.api.Table;
 import org.apache.hadoop.hive.metastore.api.hive_metastoreConstants;
 import org.apache.hadoop.hive.metastore.txn.TxnStore;
@@ -109,22 +107,22 @@ import static org.apache.hadoop.hive.ql.parse.BaseSemanticAnalyzer.escapeSQLStri
  * "location" option may be supplied followed by a path to set the location for the generated
  * scripts.
  */
-public class UpgradeTool {
-  private static final Logger LOG = LoggerFactory.getLogger(UpgradeTool.class);
+public class PreUpgradeTool {
+  private static final Logger LOG = LoggerFactory.getLogger(PreUpgradeTool.class);
   private static final int PARTITION_BATCH_SIZE = 10000;
   private final Options cmdLineOptions = new Options();
 
   public static void main(String[] args) throws Exception {
-    UpgradeTool tool = new UpgradeTool();
+    PreUpgradeTool tool = new PreUpgradeTool();
     tool.init();
     CommandLineParser parser = new GnuParser();
     CommandLine line ;
     String outputDir = ".";
-    boolean preUpgrade = false, postUpgrade = false, execute = false, nonBlocking = false;
+    boolean execute = false;
     try {
       line = parser.parse(tool.cmdLineOptions, args);
     } catch (ParseException e) {
-      System.err.println("UpgradeTool: Parsing failed.  Reason: " + e.getLocalizedMessage());
+      System.err.println("PreUpgradeTool: Parsing failed.  Reason: " + e.getLocalizedMessage());
       printAndExit(tool);
       return;
     }
@@ -139,39 +137,21 @@ public class UpgradeTool {
     if(line.hasOption("execute")) {
       execute = true;
     }
-    if(line.hasOption("preUpgrade")) {
-      preUpgrade = true;
-    }
-    if(line.hasOption("postUpgrade")) {
-      postUpgrade = true;
-    }
-    LOG.info("Starting with preUpgrade=" + preUpgrade + ", postUpgrade=" + postUpgrade +
-        ", execute=" + execute + ", location=" + outputDir);
-    if(preUpgrade && postUpgrade) {
-      throw new IllegalArgumentException("Cannot specify both preUpgrade and postUpgrade");
-    }
+    LOG.info("Starting with execute=" + execute + ", location=" + outputDir);
 
     try {
       String hiveVer = HiveVersionInfo.getShortVersion();
-      if(preUpgrade) {
-        if(!hiveVer.startsWith("2.")) {
-          throw new IllegalStateException("preUpgrade requires Hive 2.x.  Actual: " + hiveVer);
-        }
+      if(!hiveVer.startsWith("2.")) {
+        throw new IllegalStateException("preUpgrade requires Hive 2.x.  Actual: " + hiveVer);
       }
-      if(postUpgrade && execute && !isTestMode) {
-        if(!hiveVer.startsWith("3.")) {
-          throw new IllegalStateException("postUpgrade w/execute requires Hive 3.x.  Actual: " +
-              hiveVer);
-        }
-      }
-      tool.prepareAcidUpgradeInternal(outputDir, preUpgrade, postUpgrade, execute);
+      tool.prepareAcidUpgradeInternal(outputDir, execute);
     }
     catch(Exception ex) {
-      LOG.error("UpgradeTool failed", ex);
+      LOG.error("PreUpgradeTool failed", ex);
       throw ex;
     }
   }
-  private static void printAndExit(UpgradeTool tool) {
+  private static void printAndExit(PreUpgradeTool tool) {
     HelpFormatter formatter = new HelpFormatter();
     formatter.printHelp("upgrade-acid", tool.cmdLineOptions);
     System.exit(1);
@@ -179,13 +159,8 @@ public class UpgradeTool {
 
   private void init() {
     try {
-      cmdLineOptions.addOption(new Option("help", "print this message"));
-      cmdLineOptions.addOption(new Option("preUpgrade",
-          "Generates a script to execute on 2.x cluster.  This requires 2.x binaries" +
-              " on the classpath and hive-site.xml."));
-      cmdLineOptions.addOption(new Option("postUpgrade",
-          "Generates a script to execute on 3.x cluster.  This requires 3.x binaries" +
-              " on the classpath and hive-site.xml."));
+      cmdLineOptions.addOption(new Option("help", "Generates a script to execute on 2.x" +
+          " cluster.  This requires 2.x binaries on the classpath and hive-site.xml."));
       Option exec = new Option("execute",
           "Executes commands equivalent to generated scrips");
       exec.setOptionalArg(true);
@@ -208,8 +183,8 @@ public class UpgradeTool {
    *
    *
    */
-  private void prepareAcidUpgradeInternal(String scriptLocation, boolean preUpgrade,
-      boolean postUpgrade, boolean execute) throws HiveException, TException, IOException {
+  private void prepareAcidUpgradeInternal(String scriptLocation, boolean execute)
+      throws HiveException, TException, IOException {
     HiveConf conf = hiveConf != null ? hiveConf : new HiveConf();
     boolean isAcidEnabled = isAcidEnabled(conf);
     HiveMetaStoreClient hms = new HiveMetaStoreClient(conf);//MetaException
@@ -232,9 +207,9 @@ public class UpgradeTool {
       for(String tableName : tables) {
         Table t = hms.getTable(dbName, tableName);
         LOG.debug("processing table " + Warehouse.getQualifiedName(t));
-        if(preUpgrade && isAcidEnabled) {
+        if(isAcidEnabled) {
           //if acid is off, there can't be any acid tables - nothing to compact
-          if(execute && txns == null) {
+          if(txns == null) {
           /*
            This API changed from 2.x to 3.0.  so this won't even compile with 3.0
            but it doesn't need to since we only run this preUpgrade
@@ -246,18 +221,12 @@ public class UpgradeTool {
               getCompactionCommands(t, conf, hms, compactionMetaInfo, execute, db, txns);
           compactions.addAll(compactionCommands);
         }
-        if(postUpgrade && isAcidEnabled) {
-          //if acid is off post upgrade, you can't make any tables acid - will throw
-          processConversion(t, convertToAcid, convertToMM, hms, db, execute);
-        }
         /*todo: handle renaming files somewhere*/
       }
     }
     makeCompactionScript(compactions, scriptLocation, compactionMetaInfo);
-    makeConvertTableScript(convertToAcid, convertToMM, scriptLocation);
-    makeRenameFileScript(scriptLocation);//todo: is this pre or post upgrade?
-    //todo: can different tables be in different FileSystems?
-    if(preUpgrade && execute) {
+
+    if(execute) {
       while(compactionMetaInfo.compactionIds.size() > 0) {
         LOG.debug("Will wait for " + compactionMetaInfo.compactionIds.size() +
             " compactions to complete");
@@ -322,113 +291,6 @@ public class UpgradeTool {
   }
 
   /**
-   * todo: handle exclusion list
-   * Figures out which tables to make Acid, MM and (optionally, performs the operation)
-   */
-  private static void processConversion(Table t, List<String> convertToAcid,
-      List<String> convertToMM, HiveMetaStoreClient hms, Hive db, boolean execute)
-      throws TException, HiveException {
-    if(isFullAcidTable(t)) {
-      return;
-    }
-    if(!TableType.MANAGED_TABLE.name().equalsIgnoreCase(t.getTableType())) {
-      return;
-    }
-    String fullTableName = Warehouse.getQualifiedName(t);
-    if(t.getPartitionKeysSize() <= 0) {
-      if(canBeMadeAcid(fullTableName, t.getSd())) {
-        convertToAcid.add("ALTER TABLE " + Warehouse.getQualifiedName(t) + " SET TBLPROPERTIES (" +
-            "'transactional'='true')");
-        if(execute) {
-          alterTable(t, db, false);
-        }
-      }
-      else {
-        convertToMM.add("ALTER TABLE " + Warehouse.getQualifiedName(t) + " SET TBLPROPERTIES (" +
-            "'transactional'='true', 'transactional_properties'='insert_only')");
-        if(execute) {
-          alterTable(t, db, true);
-        }
-      }
-    }
-    else {
-      /*
-        each Partition may have different I/O Format so have to check them all before deciding to
-        make a full CRUD table.
-        Run in batches to prevent OOM
-       */
-      List<String> partNames = hms.listPartitionNames(t.getDbName(), t.getTableName(), (short)-1);
-      int batchSize = PARTITION_BATCH_SIZE;
-      int numWholeBatches = partNames.size()/batchSize;
-      for(int i = 0; i < numWholeBatches; i++) {
-        List<Partition> partitionList = hms.getPartitionsByNames(t.getDbName(), t.getTableName(),
-            partNames.subList(i * batchSize, (i + 1) * batchSize));
-        if(alterTable(fullTableName, partitionList, convertToMM, t, db, execute)) {
-          return;
-        }
-      }
-      if(numWholeBatches * batchSize < partNames.size()) {
-        //last partial batch
-        List<Partition> partitionList = hms.getPartitionsByNames(t.getDbName(), t.getTableName(),
-            partNames.subList(numWholeBatches * batchSize, partNames.size()));
-        if(alterTable(fullTableName, partitionList, convertToMM, t, db, execute)) {
-          return;
-        }
-      }
-      //if here checked all parts and they are Acid compatible - make it acid
-      convertToAcid.add("ALTER TABLE " + Warehouse.getQualifiedName(t) + " SET TBLPROPERTIES (" +
-          "'transactional'='true')");
-      if(execute) {
-        alterTable(t, db, false);
-      }
-    }
-  }
-  /**
-   * @return true if table was converted/command generated
-   */
-  private static boolean alterTable(String fullTableName,  List<Partition> partitionList,
-      List<String> convertToMM, Table t, Hive db, boolean execute)
-      throws InvalidOperationException, HiveException {
-    for(Partition p : partitionList) {
-      if(!canBeMadeAcid(fullTableName, p.getSd())) {
-        convertToMM.add("ALTER TABLE " + Warehouse.getQualifiedName(t) + " SET TBLPROPERTIES (" +
-            "'transactional'='true', 'transactional_properties'='insert_only')");
-        if(execute) {
-          alterTable(t, db, true);
-        }
-        return true;
-      }
-    }
-    return false;
-  }
-  private static boolean canBeMadeAcid(String fullTableName, StorageDescriptor sd) {
-    return isAcidInputOutputFormat(fullTableName, sd) && sd.getSortColsSize() <= 0;
-  }
-  private static boolean isAcidInputOutputFormat(String fullTableName, StorageDescriptor sd) {
-    try {
-      Class inputFormatClass = sd.getInputFormat() == null ? null :
-          Class.forName(sd.getInputFormat());
-      Class outputFormatClass = sd.getOutputFormat() == null ? null :
-          Class.forName(sd.getOutputFormat());
-
-      if (inputFormatClass != null && outputFormatClass != null &&
-          Class.forName("org.apache.hadoop.hive.ql.io.AcidInputFormat")
-              .isAssignableFrom(inputFormatClass) &&
-          Class.forName("org.apache.hadoop.hive.ql.io.AcidOutputFormat")
-              .isAssignableFrom(outputFormatClass)) {
-        return true;
-      }
-    } catch (ClassNotFoundException e) {
-      //if a table is using some custom I/O format and it's not in the classpath, we won't mark
-      //the table for Acid, but today (Hive 3.1 and earlier) OrcInput/OutputFormat is the only
-      //Acid format
-      LOG.error("Could not determine if " + fullTableName +
-          " can be made Acid due to: " + e.getMessage(), e);
-      return false;
-    }
-    return false;
-  }
-  /**
    * Generates a set compaction commands to run on pre Hive 3 cluster
    */
   private static void makeCompactionScript(List<String> commands, String scriptLocation,
@@ -464,29 +326,6 @@ public class UpgradeTool {
               "-- capacity of this queue appropriately");
     }
   }
-  private static void makeConvertTableScript(List<String> alterTableAcid, List<String> alterTableMm,
-      String scriptLocation) throws IOException {
-    if (alterTableAcid.isEmpty()) {
-      LOG.info("No acid conversion is necessary");
-    } else {
-      String fileName = "convertToAcid_" + System.currentTimeMillis() + ".sql";
-      LOG.debug("Writing CRUD conversion commands to " + fileName);
-      try(PrintWriter pw = createScript(alterTableAcid, fileName, scriptLocation)) {
-        //todo: fix this - it has to run in 3.0 since tables may be unbucketed
-        pw.println("-- These commands may be executed by Hive 1.x later");
-      }
-    }
-
-    if (alterTableMm.isEmpty()) {
-      LOG.info("No managed table conversion is necessary");
-    } else {
-      String fileName = "convertToMM_" + System.currentTimeMillis() + ".sql";
-      LOG.debug("Writing managed table conversion commands to " + fileName);
-      try(PrintWriter pw = createScript(alterTableMm, fileName, scriptLocation)) {
-        pw.println("-- These commands must be executed by Hive 3.0 or later");
-      }
-    }
-  }
 
   private static PrintWriter createScript(List<String> commands, String fileName,
       String scriptLocation) throws IOException {
@@ -496,17 +335,6 @@ public class UpgradeTool {
       pw.println(cmd + ";");
     }
     return pw;
-  }
-  private static void makeRenameFileScript(String scriptLocation) throws IOException {
-    List<String> commands = Collections.emptyList();
-    if (commands.isEmpty()) {
-      LOG.info("No file renaming is necessary");
-    } else {
-      String fileName = "normalizeFileNames_" + System.currentTimeMillis() + ".sh";
-      LOG.debug("Writing file renaming commands to " + fileName);
-      PrintWriter pw = createScript(commands, fileName, scriptLocation);
-      pw.close();
-    }
   }
   /**
    * @return any compaction commands to run for {@code Table t}
@@ -795,11 +623,6 @@ public class UpgradeTool {
   static Callback callback;
   @VisibleForTesting
   static int pollIntervalMs = 1000*30;
-  /**
-   * Also to enable testing until I set up Maven profiles to be able to run with 3.0 jars
-   */
-  @VisibleForTesting
-  static boolean isTestMode = false;
   /**
    * can set it from tests to test when config needs something other than default values
    */

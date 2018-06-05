@@ -284,7 +284,12 @@
     </dependency>
     <dependency>
       <groupId>org.apache.hive</groupId>
-      <artifactId>hive-upgrade-acid</artifactId>
+      <artifactId>hive-pre-upgrade</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hive</groupId>
+      <artifactId>hive-post-upgrade</artifactId>
       <version>${project.version}</version>
     </dependency>
     <dependency>
